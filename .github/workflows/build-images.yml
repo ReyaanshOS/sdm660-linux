@@ -1,18 +1,11 @@
-name: Build PL2 Linux Kernel
+```yaml
+name: Build PL2 Mainline Kernel
 
 on:
+  workflow_dispatch:
   push:
     branches:
-      - qcom-sdm660-7.*.y
-    tags:
-      - "v*-pl2"
-  pull_request:
-    branches:
-      - qcom-sdm660-7.*.y
-  workflow_dispatch:
-
-permissions:
-  contents: write
+      - qcom-sdm660-7.2.y
 
 jobs:
   build:
@@ -20,7 +13,7 @@ jobs:
 
     steps:
       - name: Checkout kernel source
-        uses: actions/checkout@v6
+        uses: actions/checkout@v4
 
       - name: Install build dependencies
         run: |
@@ -28,67 +21,166 @@ jobs:
           sudo apt-get install -y \
             bc \
             bison \
+            build-essential \
             flex \
+            gcc-aarch64-linux-gnu \
+            git \
             libssl-dev \
             libelf-dev \
-            dwarves \
-            ccache \
-            gcc-aarch64-linux-gnu \
-            binutils-aarch64-linux-gnu
+            python3 \
+            python3-pip \
+            cpio \
+            gzip \
+            xz-utils \
+            unzip \
+            wget
 
-      - name: Prepare kernel configuration
+      - name: Prepare directories
         run: |
-          mkdir -p .output
-          make O=.output \
-            ARCH=arm64 \
+          mkdir -p out
+          mkdir -p tools
+          mkdir -p boot
+
+      - name: Download mkbootimg
+        run: |
+          git clone --depth=1 \
+            https://android.googlesource.com/platform/system/tools/mkbootimg \
+            tools/mkbootimg
+
+      - name: Configure kernel
+        run: |
+          make O=out ARCH=arm64 \
             CROSS_COMPILE=aarch64-linux-gnu- \
-            LOCALVERSION= \
-            sdm660_defconfig
+            defconfig sdm660_defconfig
 
       - name: Build kernel
         run: |
-          make O=.output \
+          make -j"$(nproc)" \
+            O=out \
             ARCH=arm64 \
             CROSS_COMPILE=aarch64-linux-gnu- \
-            LOCALVERSION= \
-            -j"$(nproc)"
+            Image.gz \
+            dtbs \
+            modules
 
-      - name: Build Image.gz
+      - name: Install modules
         run: |
-          make O=.output \
+          make \
+            O=out \
             ARCH=arm64 \
             CROSS_COMPILE=aarch64-linux-gnu- \
-            LOCALVERSION= \
-            -j"$(nproc)" \
-            Image.gz
+            INSTALL_MOD_PATH="$GITHUB_WORKSPACE/modules" \
+            modules_install
 
-      - name: Collect kernel files
+      - name: Check stock boot image
         run: |
-          mkdir -p release
+          test -f boot/stock-boot.img
 
-          cp .output/arch/arm64/boot/Image.gz \
-            release/Image.gz
+      - name: Extract stock ramdisk
+        run: |
+          python3 tools/mkbootimg/unpack_bootimg.py \
+            --boot_img boot/stock-boot.img \
+            --out boot/unpacked
 
-          find .output/arch/arm64/boot/dts/qcom \
-            -type f -name '*.dtb' \
-            -exec cp --parents {} release/ \;
+          echo "Extracted files:"
+          find boot/unpacked -maxdepth 2 -type f -print
 
-          tar -czf pl2-linux-kernel.tar.gz -C release .
+      - name: Show boot image parameters
+        run: |
+          echo "===== STOCK BOOT IMAGE ====="
+          cat boot/unpacked/bootimg.cfg || true
 
-      - name: Upload Actions artifact
-        uses: actions/upload-artifact@v7
+          echo
+          echo "===== CMDLINE ====="
+          cat boot/unpacked/cmdline || true
+
+      - name: Prepare kernel
+        run: |
+          cp out/arch/arm64/boot/Image.gz boot/Image.gz
+
+      - name: Locate DTB
+        run: |
+          DTB=$(find out/arch/arm64/boot/dts -type f \
+            \( -name '*.dtb' -o -name 'qcom*.dtb' \) | head -n 1)
+
+          if [ -z "$DTB" ]; then
+            echo "No DTB found"
+            exit 1
+          fi
+
+          echo "Using DTB: $DTB"
+          cp "$DTB" boot/dtb
+
+      - name: Build boot.img
+        run: |
+          python3 tools/mkbootimg/mkbootimg.py \
+            --kernel boot/Image.gz \
+            --ramdisk boot/unpacked/ramdisk \
+            --dtb boot/dtb \
+            --pagesize 4096 \
+            --kernel_offset 0x00008000 \
+            --ramdisk_offset 0x01000000 \
+            --tags_offset 0x00000100 \
+            --second_offset 0x00f00000 \
+            --cmdline "console=ttyMSM0,115200,n8 earlycon=msm_serial_dm,0xc170000 console=tty0" \
+            --output boot.img
+
+      - name: Verify boot.img
+        run: |
+          ls -lh boot.img
+
+          python3 tools/mkbootimg/unpack_bootimg.py \
+            --boot_img boot.img \
+            --out boot/verify
+
+          echo
+          echo "===== GENERATED BOOT IMAGE ====="
+          cat boot/verify/bootimg.cfg || true
+
+          echo
+          echo "===== GENERATED CMDLINE ====="
+          cat boot/verify/cmdline || true
+
+      - name: Package modules
+        run: |
+          tar -czf modules.tar.gz modules/
+
+      - name: Upload boot.img
+        uses: actions/upload-artifact@v4
         with:
-          name: pl2-linux-kernel
+          name: pl2-mainline-boot
+          path: boot.img
+          if-no-files-found: error
+
+      - name: Upload kernel
+        uses: actions/upload-artifact@v4
+        with:
+          name: pl2-mainline-kernel
+          path: boot/Image.gz
+          if-no-files-found: error
+
+      - name: Upload DTB
+        uses: actions/upload-artifact@v4
+        with:
+          name: pl2-mainline-dtb
+          path: boot/dtb
+          if-no-files-found: error
+
+      - name: Upload modules
+        uses: actions/upload-artifact@v4
+        with:
+          name: pl2-mainline-modules
+          path: modules.tar.gz
+          if-no-files-found: error
+
+      - name: Upload build information
+        uses: actions/upload-artifact@v4
+        with:
+          name: pl2-build-info
           path: |
-            release/
-            pl2-linux-kernel.tar.gz
-          compression-level: 1
+            out/.config
+            boot/verify/bootimg.cfg
+            boot/verify/cmdline
 
-      - name: Create GitHub Release
-        if: startsWith(github.ref, 'refs/tags/')
-        uses: softprops/action-gh-release@v2
-        with:
-          files: |
-            release/Image.gz
-            pl2-linux-kernel.tar.gz
-          generate_release_notes: true
+
+**Important:** the DTB selection is currently `head -n 1`; if the PL2 DTS build produces multiple DTBs, we should change that to the exact PL2 DTB rather than accidentally packaging another SDM660-family device's DTB.
