@@ -1,4 +1,3 @@
-```yaml
 name: Build PL2 Mainline Kernel
 
 on:
@@ -98,4 +97,3 @@ jobs:
           name: PL2-mainline-config
           path: out/.config
           if-no-files-found: error
-```
