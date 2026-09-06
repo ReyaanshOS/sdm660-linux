@@ -256,4 +256,3 @@ jobs:
           name: PL2-build-config
           path: out/.config
           if-no-files-found: error
-```
