@@ -181,6 +181,3 @@ jobs:
             out/.config
             boot/verify/bootimg.cfg
             boot/verify/cmdline
-
-
-**Important:** the DTB selection is currently `head -n 1`; if the PL2 DTS build produces multiple DTBs, we should change that to the exact PL2 DTB rather than accidentally packaging another SDM660-family device's DTB.
