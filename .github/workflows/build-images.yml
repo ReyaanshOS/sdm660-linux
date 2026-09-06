@@ -1,4 +1,3 @@
-```yaml
 name: Build PL2 Mainline Kernel
 
 on:
@@ -12,28 +11,26 @@ jobs:
     runs-on: ubuntu-24.04
 
     steps:
-      - name: Checkout kernel source
+      - name: Checkout source
         uses: actions/checkout@v4
 
-      - name: Install build dependencies
+      - name: Install dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y \
             bc \
             bison \
             build-essential \
+            cpio \
             flex \
             gcc-aarch64-linux-gnu \
             git \
-            libssl-dev \
-            libelf-dev \
-            python3 \
-            python3-pip \
-            cpio \
             gzip \
-            xz-utils \
+            libelf-dev \
+            libssl-dev \
+            python3 \
             unzip \
-            wget
+            xz-utils
 
       - name: Prepare directories
         run: |
@@ -41,17 +38,42 @@ jobs:
           mkdir -p tools
           mkdir -p boot
 
-      - name: Download mkbootimg
+      # ============================================================
+      # Download stock Nokia 6.1 PL2 boot.img
+      # ============================================================
+
+      - name: Download stock PL2 boot.img
+        run: |
+          wget -O boot/stock-boot.img \
+            "https://dl.pixelexperience.org/Pv_GKKuO_pDekL3RihvybgtmxcMRpp0y7Kh1sM97x5moeU3YqQF35k0BxnVj_NEakW2bE3gAEEuiu2EXyYKLQHlfKNh4Ul4s79hTyFFxymQ=/PixelExperience_PL2-13.0-20240129-2140-OFFICIAL.img"
+
+          ls -lh boot/stock-boot.img
+
+      # ============================================================
+      # Get Android mkbootimg tools
+      # ============================================================
+
+      - name: Download mkbootimg tools
         run: |
           git clone --depth=1 \
             https://android.googlesource.com/platform/system/tools/mkbootimg \
             tools/mkbootimg
 
+      # ============================================================
+      # Configure kernel
+      # ============================================================
+
       - name: Configure kernel
         run: |
-          make O=out ARCH=arm64 \
+          make \
+            O=out \
+            ARCH=arm64 \
             CROSS_COMPILE=aarch64-linux-gnu- \
             defconfig sdm660_defconfig
+
+      # ============================================================
+      # Build kernel + DTBs + modules
+      # ============================================================
 
       - name: Build kernel
         run: |
@@ -63,6 +85,10 @@ jobs:
             dtbs \
             modules
 
+      # ============================================================
+      # Install modules
+      # ============================================================
+
       - name: Install modules
         run: |
           make \
@@ -72,44 +98,80 @@ jobs:
             INSTALL_MOD_PATH="$GITHUB_WORKSPACE/modules" \
             modules_install
 
-      - name: Check stock boot image
-        run: |
-          test -f boot/stock-boot.img
+      # ============================================================
+      # Unpack stock boot image
+      # ============================================================
 
-      - name: Extract stock ramdisk
+      - name: Unpack stock boot.img
         run: |
           python3 tools/mkbootimg/unpack_bootimg.py \
             --boot_img boot/stock-boot.img \
             --out boot/unpacked
 
-          echo "Extracted files:"
-          find boot/unpacked -maxdepth 2 -type f -print
-
-      - name: Show boot image parameters
-        run: |
-          echo "===== STOCK BOOT IMAGE ====="
+          echo "===== STOCK BOOT CONFIG ====="
           cat boot/unpacked/bootimg.cfg || true
 
           echo
-          echo "===== CMDLINE ====="
+          echo "===== STOCK CMDLINE ====="
           cat boot/unpacked/cmdline || true
+
+          echo
+          echo "===== UNPACKED FILES ====="
+          find boot/unpacked -maxdepth 2 -type f -printf '%p\n'
+
+      # ============================================================
+      # Prepare mainline kernel
+      # ============================================================
 
       - name: Prepare kernel
         run: |
           cp out/arch/arm64/boot/Image.gz boot/Image.gz
 
-      - name: Locate DTB
+      # ============================================================
+      # Find PL2 DTB
+      #
+      # The Nokia 6.1 PL2 DTS should be the DTB selected here.
+      # ============================================================
+
+      - name: Find DTB
         run: |
-          DTB=$(find out/arch/arm64/boot/dts -type f \
-            \( -name '*.dtb' -o -name 'qcom*.dtb' \) | head -n 1)
+          echo "Available DTBs:"
+          find out/arch/arm64/boot/dts \
+            -type f \
+            -name '*.dtb' \
+            -print
+
+          DTB=$(find out/arch/arm64/boot/dts \
+            -type f \
+            -name '*.dtb' \
+            | grep -Ei 'pl2|nokia' \
+            | head -n 1)
 
           if [ -z "$DTB" ]; then
-            echo "No DTB found"
+            echo "No Nokia PL2 DTB found."
+            echo "Available DTBs were:"
+            find out/arch/arm64/boot/dts -type f -name '*.dtb'
             exit 1
           fi
 
-          echo "Using DTB: $DTB"
+          echo "Using DTB:"
+          echo "$DTB"
+
           cp "$DTB" boot/dtb
+
+      # ============================================================
+      # Build boot.img
+      #
+      # Stock PL2 Android boot parameters:
+      #
+      # page size       = 4096
+      # kernel offset   = 0x00008000
+      # ramdisk offset  = 0x01000000
+      # tags offset     = 0x00000100
+      # second offset   = 0x00f00000
+      #
+      # Console is kept for visible TTY/kernel output.
+      # ============================================================
 
       - name: Build boot.img
         run: |
@@ -125,59 +187,73 @@ jobs:
             --cmdline "console=ttyMSM0,115200,n8 earlycon=msm_serial_dm,0xc170000 console=tty0" \
             --output boot.img
 
+      # ============================================================
+      # Verify generated boot.img
+      # ============================================================
+
       - name: Verify boot.img
         run: |
-          ls -lh boot.img
+          mkdir -p boot/verify
 
           python3 tools/mkbootimg/unpack_bootimg.py \
             --boot_img boot.img \
             --out boot/verify
 
-          echo
-          echo "===== GENERATED BOOT IMAGE ====="
+          echo "===== GENERATED BOOT CONFIG ====="
           cat boot/verify/bootimg.cfg || true
 
           echo
           echo "===== GENERATED CMDLINE ====="
           cat boot/verify/cmdline || true
 
+          echo
+          echo "===== GENERATED IMAGE ====="
+          ls -lh boot.img
+
+      # ============================================================
+      # Package modules
+      # ============================================================
+
       - name: Package modules
         run: |
           tar -czf modules.tar.gz modules/
 
+      # ============================================================
+      # Upload final artifacts
+      # ============================================================
+
       - name: Upload boot.img
         uses: actions/upload-artifact@v4
         with:
-          name: pl2-mainline-boot
+          name: PL2-mainline-boot
           path: boot.img
           if-no-files-found: error
 
       - name: Upload kernel
         uses: actions/upload-artifact@v4
         with:
-          name: pl2-mainline-kernel
+          name: PL2-mainline-kernel
           path: boot/Image.gz
           if-no-files-found: error
 
       - name: Upload DTB
         uses: actions/upload-artifact@v4
         with:
-          name: pl2-mainline-dtb
+          name: PL2-mainline-dtb
           path: boot/dtb
           if-no-files-found: error
 
       - name: Upload modules
         uses: actions/upload-artifact@v4
         with:
-          name: pl2-mainline-modules
+          name: PL2-mainline-modules
           path: modules.tar.gz
           if-no-files-found: error
 
-      - name: Upload build information
+      - name: Upload build configuration
         uses: actions/upload-artifact@v4
         with:
-          name: pl2-build-info
-          path: |
-            out/.config
-            boot/verify/bootimg.cfg
-            boot/verify/cmdline
+          name: PL2-build-config
+          path: out/.config
+          if-no-files-found: error
+```
