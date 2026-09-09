@@ -6,6 +6,9 @@ on:
     branches:
       - qcom-sdm660-7.2.y
 
+permissions:
+  contents: write
+
 jobs:
   build:
     runs-on: ubuntu-24.04
@@ -25,7 +28,8 @@ jobs:
             gcc-aarch64-linux-gnu \
             libelf-dev \
             libssl-dev \
-            python3
+            python3 \
+            zip
 
       - name: Configure kernel
         run: |
@@ -70,30 +74,42 @@ jobs:
           echo "===== MODULES ====="
           du -sh modules/
 
-      - name: Upload Image.gz
+      - name: Package build output
+        if: always()
+        continue-on-error: true
+        run: |
+          if [ -d out ]; then
+            zip -r out.zip out
+          else
+            echo "out/ does not exist; nothing to package"
+            exit 1
+          fi
+
+      - name: Upload build output
+        if: always()
+        continue-on-error: true
         uses: actions/upload-artifact@v4
         with:
-          name: PL2-mainline-Image.gz
-          path: out/arch/arm64/boot/Image.gz
+          name: PL2-mainline-out
+          path: out.zip
           if-no-files-found: error
 
-      - name: Upload DTBs
-        uses: actions/upload-artifact@v4
-        with:
-          name: PL2-mainline-DTBS
-          path: out/arch/arm64/boot/dts/**/*.dtb
-          if-no-files-found: error
+      - name: Commit build output
+        if: always()
+        continue-on-error: true
+        run: |
+          if [ ! -d out ]; then
+            echo "out/ does not exist; nothing to commit"
+            exit 1
+          fi
 
-      - name: Upload modules
-        uses: actions/upload-artifact@v4
-        with:
-          name: PL2-mainline-modules
-          path: modules/
-          if-no-files-found: error
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -f out/
 
-      - name: Upload kernel config
-        uses: actions/upload-artifact@v4
-        with:
-          name: PL2-mainline-config
-          path: out/.config
-          if-no-files-found: error
+          if git diff --cached --quiet; then
+            echo "No changes in out/ to commit"
+          else
+            git commit -m "ci: commit kernel build output [skip ci]"
+            git push
+          fi
