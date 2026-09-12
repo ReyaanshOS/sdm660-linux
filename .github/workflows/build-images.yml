@@ -85,15 +85,6 @@ jobs:
             exit 1
           fi
 
-      - name: Upload build output
-        if: always()
-        continue-on-error: true
-        uses: actions/upload-artifact@v4
-        with:
-          name: PL2-mainline-out
-          path: out.zip
-          if-no-files-found: error
-
       - name: Commit build output
         if: always()
         continue-on-error: true
